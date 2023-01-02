@@ -1,10 +1,14 @@
 use std::fmt;
 use std::mem;
+use std::ffi::c_void;
 
 use windows::core::*;
 use windows::Win32::Foundation::*;
+use windows::Win32::UI::WindowsAndMessaging::*;
 
 mod sys;
+
+use sys::{ResourceName, ResourceType};
 
 fn main() {
     if let Err(e) = try_main() {
@@ -14,10 +18,6 @@ fn main() {
 }
 
 fn try_main() -> anyhow::Result<()> {
-    let types = mui::get_resource_types("ping.exe")?;
-    for typ in types {
-        println!("{}", typ);
-    }
     Ok(())
 }
 
@@ -98,98 +98,6 @@ unsafe extern "system" fn enum_res_names(
     name: PCWSTR,
     param: isize,
 ) -> BOOL {
-    println!("Callback called");
-    let names = mem::transmute::<isize, &mut Vec<String>>(param);
-
-    let name_num = mem::transmute::<PCWSTR, usize>(name);
-    if name_num >> 16 == 0 {
-        let id: u16 = (name_num & 0xffff) as u16;
-        names.push(id.to_string());
-    } else {
-        names.push(sys::wide_to_utf8(name.0));
-    }
-
-    true.into()
-}
-
-pub fn get_string_resource_names(mod_name: &str) -> Result<Vec<String>> {
-    let module = sys::load_library(mod_name).map_err(|e| Error::GetResNames {
-        mod_name: mod_name.to_string(),
-        err_msg: "failed to load the module".to_string(),
-        sys_err: e,
-    })?;
-
-    let mut names: Vec<String> = Vec::new();
-    let param = unsafe { mem::transmute::<&mut Vec<String>, isize>(&mut names) };
-    sys::enum_resource_names(module, sys::RT_MANIFEST, Some(enum_res_names), param).map_err(
-        |e| Error::GetResNames {
-            mod_name: mod_name.to_string(),
-            err_msg: "failed to enumerate string resource names".to_string(),
-            sys_err: e,
-        },
-    )?;
-
-    Ok(names)
-}
-
-unsafe extern "system" fn enum_res_types(_module: HINSTANCE, typ: PCWSTR, param: isize) -> BOOL {
-    let types = mem::transmute::<isize, &mut Vec<u16>>(param);
-
-    let type_num = mem::transmute::<PCWSTR, usize>(typ);
-    let type_val: u16;
-    if type_num >> 16 == 0 {
-        type_val = (type_num & 0xffff) as u16;
-    } else {
-        let type_str = sys::wide_to_utf8(typ.0);
-        if type_str.starts_with("#") {
-            type_val = type_str[1..].parse().expect("number should following #");
-        } else {
-            println!("NOTE: resource type is a string not starting with #: {}", type_str);
-            type_val = 0;
-        }
-    }
-
-    types.push(type_val);
-    true.into()
-}
-
-pub fn get_resource_types(mod_name: &str) -> Result<Vec<u16>> {
-    let module = sys::load_library(mod_name).map_err(|e| Error::GetResTypes {
-        mod_name: mod_name.to_string(),
-        err_msg: "failed to load the module".to_string(),
-        sys_err: e,
-    })?;
-
-    let mut types: Vec<u16> = Vec::new();
-    let param = unsafe { mem::transmute::<&mut Vec<u16>, isize>(&mut types) };
-    sys::enum_resource_types(module, Some(enum_res_types), param).map_err(|e| {
-        Error::GetResTypes {
-            mod_name: mod_name.to_string(),
-            err_msg: "failed to enumerate resource types".to_string(),
-            sys_err: e,
-        }
-    })?;
-
-    Ok(types)
-}
-
-unsafe extern "system" fn enum_res_types2(_module: HINSTANCE, typ: PCWSTR, param: isize) -> BOOL {
-    let types = mem::transmute::<isize, &mut Vec<ResourceType>>(param);
-
-    match ResourceType::parse(typ) {
-        Ok(res_type) => types.push(res_type),
-        Err(_) => println!("ERROR: invalid resource type: expected resource ID after '#'"),
-    };
-
-    true.into()
-}
-
-unsafe extern "system" fn enum_res_names2(
-    _module: HINSTANCE,
-    _typ: PCWSTR,
-    name: PCWSTR,
-    param: isize,
-) -> BOOL {
     let names = mem::transmute::<isize, &mut Vec<ResourceName>>(param);
 
     match ResourceName::parse(name) {
@@ -200,7 +108,7 @@ unsafe extern "system" fn enum_res_names2(
     true.into()
 }
 
-pub fn get_message_table_entries(mod_name: &str) -> Result<Vec<(u16, String)>> {
+pub fn get_all_message_table_entries(mod_name: &str) -> Result<Vec<(u16, String)>> {
     let module = sys::load_library(mod_name).map_err(|e| Error::GetMsgTblEntries {
         mod_name: mod_name.to_string(),
         err_msg: "failed to load the module".to_string(),
@@ -209,19 +117,72 @@ pub fn get_message_table_entries(mod_name: &str) -> Result<Vec<(u16, String)>> {
 
     let mut mt_res_names: Vec<ResourceName> = Vec::new();
     let param = unsafe { mem::transmute::<&mut Vec<ResourceName>, isize>(&mut mt_res_names) };
-    sys::enum_resource_names(module, sys::RT_MESSAGETABLE, Some(enum_res_names2), param).map_err(
-        |e| Error::GetMsgTblEntries {
-            mod_name: mod_name.to_string(),
-            err_msg: "failed to enumerate message table resource names".to_string(),
-            sys_err: e,
-        },
-    )?;
+    sys::enum_resource_names(
+        module,
+        sys::ResourceType::from_id(sys::RT_MESSAGETABLE),
+        Some(enum_res_names),
+        param,
+    )
+    .map_err(|e| Error::GetMsgTblEntries {
+        mod_name: mod_name.to_string(),
+        err_msg: "failed to enumerate message table resource names".to_string(),
+        sys_err: e,
+    })?;
 
-    for mt_res_name in mt_res_names {
-
-    }
+    for mt_res_name in mt_res_names {}
+    unimplemented!()
 }
 
-fn get_message_table_entries(module: HINSTANCE, mt_name: ResourceName) -> Result<(u16, String)>> {
-    FindResourceW(module, )
+fn get_message_table_entries(
+    mod_name: &str,
+    module: HINSTANCE,
+    mt_name: ResourceName,
+) -> Result<Vec<(u32, String)>> {
+    let resource = sys::find_resource(
+        module,
+        mt_name,
+        sys::ResourceType::from_id(sys::RT_MESSAGETABLE),
+    )
+    .map_err(|e| Error::GetMsgTblEntries {
+        mod_name: mod_name.to_string(),
+        err_msg: "failed to find the resource".to_string(),
+        sys_err: e,
+    })?;
+
+    let res_data = sys::load_resource(module, resource).map_err(|e| Error::GetMsgTblEntries {
+        mod_name: mod_name.to_string(),
+        err_msg: "failed to load the resource".to_string(),
+        sys_err: e,
+    })?;
+
+    let res_mem = sys::lock_resource(res_data).map_err(|e| Error::GetMsgTblEntries {
+        mod_name: mod_name.to_string(),
+        err_msg: "failed to lock the resource".to_string(),
+        sys_err: e,
+    })?;
+
+    let data = unsafe { mem::transmute::<&c_void, &MESSAGE_RESOURCE_DATA>(&*res_mem) };
+    
+    let blocks = unsafe { std::slice::from_raw_parts(
+        &data.Blocks as *const MESSAGE_RESOURCE_BLOCK,
+        data.NumberOfBlocks as usize
+    )};
+    for block in blocks {
+        // NOTE: Each entry is variable length.
+        let start_entries = unsafe {
+            (data as *const MESSAGE_RESOURCE_DATA as *const u8).add(block.OffsetToEntries as usize)
+        };
+        let mut entry = unsafe {
+            &*(start_entries as *const MESSAGE_RESOURCE_ENTRY)
+        };
+        let num_entries = block.HighId - block.LowId + 1;
+        for entry_idx in 0..num_entries {
+            let entry_id = block.LowId + entry_idx;
+
+            entry = unsafe {
+                &*((entry as *const u8).add(entry.Length))
+        }
+    }
+
+    unimplemented!()
 }

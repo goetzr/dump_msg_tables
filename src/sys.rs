@@ -1,11 +1,12 @@
-use std::mem::{self, MaybeUninit};
+use std::ffi::c_void;
 use std::fmt;
+use std::mem::{self, MaybeUninit};
 
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Diagnostics::Debug::*;
-use windows::Win32::System::Memory::*;
 use windows::Win32::System::LibraryLoader::*;
+use windows::Win32::System::Memory::*;
 
 #[derive(Debug)]
 pub struct Error {
@@ -15,7 +16,10 @@ pub struct Error {
 
 impl Error {
     fn new<S: Into<String>>(code: u32, msg: S) -> Self {
-        Error { code, msg: msg.into() }
+        Error {
+            code,
+            msg: msg.into(),
+        }
     }
 }
 
@@ -27,7 +31,7 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-type Result<T> =  std::result::Result<T, Error>;
+type Result<T> = std::result::Result<T, Error>;
 
 pub fn wide_to_utf8(mut data: *const u16) -> String {
     let mut out = String::new();
@@ -49,7 +53,7 @@ pub fn utf8_to_wide(data: &str) -> Vec<u16> {
 
 pub enum ResourceMetadata {
     Id(u16),
-    String(String),
+    String { utf8: String, wide: Vec<u16> },
 }
 
 impl ResourceMetadata {
@@ -65,10 +69,32 @@ impl ResourceMetadata {
                 match id {
                     Ok(id) => Ok(ResourceMetadata::Id(id)),
                     Err(_) => Err(()),
-                } 
+                }
             } else {
-                Ok(ResourceMetadata::String(data_str))
+                let wide = utf8_to_wide(&data_str);
+                Ok(ResourceMetadata::String {
+                    utf8: data_str,
+                    wide,
+                })
             }
+        }
+    }
+
+    pub fn pack(&self) -> PCWSTR {
+        match &self {
+            ResourceName::Id(id) => unsafe { mem::transmute::<usize, PCWSTR>(*id as usize) },
+            ResourceName::String { wide, .. } => PCWSTR::from_raw(wide.as_ptr()),
+        }
+    }
+
+    pub fn from_id(id: u16) -> Self {
+        ResourceMetadata::Id(id)
+    }
+
+    pub fn from_str(data_str: &str) -> Self {
+        ResourceMetadata::String {
+            utf8: data_str.to_string(),
+            wide: utf8_to_wide(data_str),
         }
     }
 }
@@ -77,7 +103,7 @@ impl ToString for ResourceMetadata {
     fn to_string(&self) -> String {
         match &self {
             ResourceMetadata::Id(id) => format!("ID: {}", id),
-            ResourceMetadata::String(id_str) => format!("String: {}", id_str),
+            ResourceMetadata::String { utf8, .. } => format!("String: {}", utf8),
         }
     }
 }
@@ -98,16 +124,27 @@ pub fn build_error_message(error_code: u32) -> String {
             None,
         );
         match ret {
-            0 => panic!("ERROR: FormatMessageW failed. Error code = {}.", GetLastError().0),
+            0 => panic!(
+                "ERROR: FormatMessageW failed. Error code = {}.",
+                GetLastError().0
+            ),
             _ => {
                 let buf = buf.assume_init();
                 let mut msg = wide_to_utf8(buf.0);
                 // Remove any trailing whitespace.
-                for _ in 0..msg.chars().rev().take_while(|&c| char::is_whitespace(c)).count() {
+                for _ in 0..msg
+                    .chars()
+                    .rev()
+                    .take_while(|&c| char::is_whitespace(c))
+                    .count()
+                {
                     msg.pop();
                 }
                 if LocalFree(mem::transmute::<PWSTR, isize>(buf)) != 0 {
-                    panic!("ERROR: LocalFree failed. Error code = {}.", GetLastError().0)
+                    panic!(
+                        "ERROR: LocalFree failed. Error code = {}.",
+                        GetLastError().0
+                    )
                 } else {
                     msg
                 }
@@ -130,10 +167,14 @@ pub const _RT_RCDATA: u16 = 10;
 pub const RT_MANIFEST: u16 = 24;
 pub const RT_MESSAGETABLE: u16 = 11;
 
-pub fn enum_resource_names(module: HINSTANCE, typ: u16, enum_func: ENUMRESNAMEPROCW, param: isize) -> Result<()> {
+pub fn enum_resource_names(
+    module: HINSTANCE,
+    typ: ResourceType,
+    enum_func: ENUMRESNAMEPROCW,
+    param: isize,
+) -> Result<()> {
     unsafe {
-        let typ = mem::transmute::<u64, PCWSTR>(typ as u64);
-        if EnumResourceNamesW(module, typ, enum_func, param).as_bool() {
+        if EnumResourceNamesW(module, typ.pack(), enum_func, param).as_bool() {
             Ok(())
         } else {
             let error_code = GetLastError().0;
@@ -142,7 +183,11 @@ pub fn enum_resource_names(module: HINSTANCE, typ: u16, enum_func: ENUMRESNAMEPR
     }
 }
 
-pub fn enum_resource_types(module: HINSTANCE, enum_func: ENUMRESTYPEPROCW, param: isize) -> Result<()> {
+pub fn enum_resource_types(
+    module: HINSTANCE,
+    enum_func: ENUMRESTYPEPROCW,
+    param: isize,
+) -> Result<()> {
     unsafe {
         if EnumResourceTypesW(module, enum_func, param).as_bool() {
             Ok(())
@@ -155,21 +200,36 @@ pub fn enum_resource_types(module: HINSTANCE, enum_func: ENUMRESTYPEPROCW, param
 
 pub fn find_resource(module: HINSTANCE, name: ResourceName, typ: ResourceType) -> Result<HRSRC> {
     unsafe {
-        let name = match name {
-            ResourceName::Id(id) => mem::transmute::<usize, PCWSTR>(id as usize),
-            ResourceName::String(data_str) => {
-                let data_str = utf8_to_wide(data_str);
-                // TODO: Need the vector to stay around for the pointer.
-            }
-        }
-        let name = mem::transmute::<usize, PCWSTR>(name as usize);
-        let typ = mem::transmute::<usize, PCWSTR>(typ as usize);
-        let res_handle = FindResourceW(module, name, typ);
-        if res_handle.is_invalid() {
+        let resource = FindResourceW(module, name.pack(), typ.pack());
+        if resource.is_invalid() {
             let error_code = GetLastError().0;
             Err(Error::new(error_code, build_error_message(error_code)))
         } else {
-            Ok(res_handle)
+            Ok(resource)
+        }
+    }
+}
+
+pub fn load_resource(module: HINSTANCE, resource: HRSRC) -> Result<isize> {
+    unsafe {
+        let res_data = LoadResource(module, resource);
+        if res_data == 0 {
+            let error_code = GetLastError().0;
+            Err(Error::new(error_code, build_error_message(error_code)))
+        } else {
+            Ok(res_data)
+        }
+    }
+}
+
+pub fn lock_resource(res_data: isize) -> Result<*mut c_void> {
+    unsafe {
+        let res_mem = LockResource(res_data);
+        if res_mem.is_null() {
+            let error_code = GetLastError().0;
+            Err(Error::new(error_code, build_error_message(error_code)))
+        } else {
+            Ok(res_mem)
         }
     }
 }
