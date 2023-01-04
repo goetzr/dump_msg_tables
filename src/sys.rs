@@ -44,6 +44,17 @@ pub fn wide_to_utf8(mut data: *const u16) -> String {
     out
 }
 
+pub fn ansi_to_utf8(mut data: *const u8) -> String {
+    let mut out = String::new();
+    unsafe {
+        while *data != 0 {
+            out.push(char::from_u32_unchecked(*data as u32));
+            data = data.add(1);
+        }
+    }
+    out
+}
+
 pub fn utf8_to_wide(data: &str) -> Vec<u16> {
     let mut out: Vec<u16> = data.encode_utf16().collect();
     // Add NULL terminator.

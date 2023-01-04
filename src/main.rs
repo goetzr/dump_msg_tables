@@ -1,6 +1,6 @@
+use std::ffi::{c_void, CString};
 use std::fmt;
 use std::mem;
-use std::ffi::c_void;
 
 use windows::core::*;
 use windows::Win32::Foundation::*;
@@ -162,25 +162,36 @@ fn get_message_table_entries(
     })?;
 
     let data = unsafe { mem::transmute::<&c_void, &MESSAGE_RESOURCE_DATA>(&*res_mem) };
-    
-    let blocks = unsafe { std::slice::from_raw_parts(
-        &data.Blocks as *const MESSAGE_RESOURCE_BLOCK,
-        data.NumberOfBlocks as usize
-    )};
+
+    let blocks = unsafe {
+        std::slice::from_raw_parts(
+            &data.Blocks as *const MESSAGE_RESOURCE_BLOCK,
+            data.NumberOfBlocks as usize,
+        )
+    };
     for block in blocks {
         // NOTE: Each entry is variable length.
         let start_entries = unsafe {
             (data as *const MESSAGE_RESOURCE_DATA as *const u8).add(block.OffsetToEntries as usize)
         };
-        let mut entry = unsafe {
-            &*(start_entries as *const MESSAGE_RESOURCE_ENTRY)
-        };
+        let mut entry = unsafe { &*(start_entries as *const MESSAGE_RESOURCE_ENTRY) };
         let num_entries = block.HighId - block.LowId + 1;
         for entry_idx in 0..num_entries {
             let entry_id = block.LowId + entry_idx;
 
-            entry = unsafe {
-                &*((entry as *const u8).add(entry.Length))
+            let entry_str = match entry.Flags {
+                // Ansi
+                0 => sys::ansi_to_utf8(entry.Text.as_ptr()),
+                // Unicode
+                1 => sys::wide_to_utf8(entry.Text.as_ptr() as  *const u16),
+                _ => panic!("Unexpected flags value in message table entry"),
+            };
+
+            unsafe {
+                let next_entry = (entry as *const MESSAGE_RESOURCE_ENTRY as *const u8)
+                    .add(entry.Length as usize);
+                let entry = &*(next_entry as *const MESSAGE_RESOURCE_ENTRY);
+            }
         }
     }
 
