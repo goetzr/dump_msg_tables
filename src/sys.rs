@@ -172,10 +172,6 @@ pub fn load_library(mod_name: &str) -> Result<HINSTANCE> {
     }
 }
 
-pub const _RT_STRING: u16 = 6;
-pub const _RT_VERSION: u16 = 16;
-pub const _RT_RCDATA: u16 = 10;
-pub const RT_MANIFEST: u16 = 24;
 pub const RT_MESSAGETABLE: u16 = 11;
 
 pub fn enum_resource_names(
@@ -194,20 +190,20 @@ pub fn enum_resource_names(
     }
 }
 
-pub fn enum_resource_types(
-    module: HINSTANCE,
-    enum_func: ENUMRESTYPEPROCW,
-    param: isize,
-) -> Result<()> {
-    unsafe {
-        if EnumResourceTypesW(module, enum_func, param).as_bool() {
-            Ok(())
-        } else {
-            let error_code = GetLastError().0;
-            Err(Error::new(error_code, build_error_message(error_code)))
-        }
-    }
-}
+// pub fn enum_resource_types(
+//     module: HINSTANCE,
+//     enum_func: ENUMRESTYPEPROCW,
+//     param: isize,
+// ) -> Result<()> {
+//     unsafe {
+//         if EnumResourceTypesW(module, enum_func, param).as_bool() {
+//             Ok(())
+//         } else {
+//             let error_code = GetLastError().0;
+//             Err(Error::new(error_code, build_error_message(error_code)))
+//         }
+//     }
+// }
 
 pub fn find_resource(module: HINSTANCE, name: ResourceName, typ: ResourceType) -> Result<HRSRC> {
     unsafe {

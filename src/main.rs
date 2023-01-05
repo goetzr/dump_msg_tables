@@ -1,4 +1,4 @@
-use std::ffi::{c_void, CString};
+use std::ffi::c_void;
 use std::fmt;
 use std::mem;
 
@@ -18,55 +18,26 @@ fn main() {
 }
 
 fn try_main() -> anyhow::Result<()> {
+    let entries = get_message_table_entries("ping.exe")?;
+    for entry in entries {
+        println!("{:08x}: {}", entry.0, entry.1);
+    }
     Ok(())
 }
 
 #[derive(Debug)]
-pub enum Error {
-    GetResNames {
-        mod_name: String,
-        err_msg: String,
-        sys_err: sys::Error,
-    },
-    GetResTypes {
-        mod_name: String,
-        err_msg: String,
-        sys_err: sys::Error,
-    },
+enum Error {
     GetMsgTblEntries {
         mod_name: String,
         err_msg: String,
         sys_err: sys::Error,
     },
-    ResourceMetadata,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use self::Error::*;
         match &self {
-            GetResNames {
-                mod_name,
-                err_msg,
-                sys_err,
-            } => {
-                write!(
-                    f,
-                    "failed to get resource names for {}: {}: {}",
-                    mod_name, err_msg, sys_err
-                )
-            }
-            GetResTypes {
-                mod_name,
-                err_msg,
-                sys_err,
-            } => {
-                write!(
-                    f,
-                    "failed to get resource types for {}: {}: {}",
-                    mod_name, err_msg, sys_err
-                )
-            }
             GetMsgTblEntries {
                 mod_name,
                 err_msg,
@@ -76,12 +47,6 @@ impl fmt::Display for Error {
                     f,
                     "failed to get message table entries for {}: {}: {}",
                     mod_name, err_msg, sys_err
-                )
-            }
-            ResourceMetadata => {
-                write!(
-                    f,
-                    "invalid resource metadata: expected resource ID after '#'"
                 )
             }
         }
@@ -108,7 +73,7 @@ unsafe extern "system" fn enum_res_names(
     true.into()
 }
 
-pub fn get_all_message_table_entries(mod_name: &str) -> Result<Vec<(u16, String)>> {
+fn get_message_table_entries(mod_name: &str) -> Result<Vec<(u32, String)>> {
     let module = sys::load_library(mod_name).map_err(|e| Error::GetMsgTblEntries {
         mod_name: mod_name.to_string(),
         err_msg: "failed to load the module".to_string(),
@@ -129,19 +94,22 @@ pub fn get_all_message_table_entries(mod_name: &str) -> Result<Vec<(u16, String)
         sys_err: e,
     })?;
 
-    for mt_res_name in mt_res_names {}
-    unimplemented!()
+    let mut results = Vec::new();
+    for mt_res_name in mt_res_names {
+        results.extend(get_message_table_entries_inner(mod_name, module, mt_res_name)?)
+    }
+    Ok(results)
 }
 
-fn get_message_table_entries(
+fn get_message_table_entries_inner(
     mod_name: &str,
     module: HINSTANCE,
-    mt_name: ResourceName,
+    mt_res_name: ResourceName,
 ) -> Result<Vec<(u32, String)>> {
     let resource = sys::find_resource(
         module,
-        mt_name,
-        sys::ResourceType::from_id(sys::RT_MESSAGETABLE),
+        mt_res_name,
+        ResourceType::from_id(sys::RT_MESSAGETABLE),
     )
     .map_err(|e| Error::GetMsgTblEntries {
         mod_name: mod_name.to_string(),
@@ -161,7 +129,9 @@ fn get_message_table_entries(
         sys_err: e,
     })?;
 
-    let data = unsafe { mem::transmute::<&c_void, &MESSAGE_RESOURCE_DATA>(&*res_mem) };
+    let data = unsafe { mem::transmute::<*const c_void, &MESSAGE_RESOURCE_DATA>(res_mem) };
+
+    let mut results = Vec::new();
 
     let blocks = unsafe {
         std::slice::from_raw_parts(
@@ -175,10 +145,7 @@ fn get_message_table_entries(
             (data as *const MESSAGE_RESOURCE_DATA as *const u8).add(block.OffsetToEntries as usize)
         };
         let mut entry = unsafe { &*(start_entries as *const MESSAGE_RESOURCE_ENTRY) };
-        let num_entries = block.HighId - block.LowId + 1;
-        for entry_idx in 0..num_entries {
-            let entry_id = block.LowId + entry_idx;
-
+        for entry_id in block.LowId..block.HighId + 1 {
             let entry_str = match entry.Flags {
                 // Ansi
                 0 => sys::ansi_to_utf8(entry.Text.as_ptr()),
@@ -187,13 +154,15 @@ fn get_message_table_entries(
                 _ => panic!("Unexpected flags value in message table entry"),
             };
 
+            results.push((entry_id, entry_str));
+
             unsafe {
                 let next_entry = (entry as *const MESSAGE_RESOURCE_ENTRY as *const u8)
                     .add(entry.Length as usize);
-                let entry = &*(next_entry as *const MESSAGE_RESOURCE_ENTRY);
+                entry = &*(next_entry as *const MESSAGE_RESOURCE_ENTRY);
             }
         }
     }
 
-    unimplemented!()
+    Ok(results)
 }
