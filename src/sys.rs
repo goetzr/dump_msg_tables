@@ -15,10 +15,50 @@ pub struct Error {
 }
 
 impl Error {
-    fn new<S: Into<String>>(code: u32, msg: S) -> Self {
+    fn new() -> Self {
+        let code = unsafe { GetLastError().0 };
         Error {
             code,
-            msg: msg.into(),
+            msg: Error::build_error_message(code),
+        }
+    }
+
+    fn from_win_error(err: )
+
+    fn build_error_message(code: u32) -> String {
+        unsafe {
+            let mut buf = MaybeUninit::<PWSTR>::uninit();
+            let ret = FormatMessageW(
+                FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
+                None,
+                code,
+                0,
+                mem::transmute::<*mut PWSTR, PWSTR>(buf.as_mut_ptr()),
+                0,
+                None,
+            );
+            match ret {
+                0 => "<error message unavailable>".to_string(),
+                _ => {
+                    let buf = buf.assume_init();
+                    let mut msg = wide_to_utf8(buf.0);
+                    LocalFree(mem::transmute::<PWSTR, isize>(buf));
+
+                    // Remove any trailing whitespace.
+                    let mut new_len = msg.len();
+                    msg.chars().rev().take_while(|&c| char::is_whitespace(c)).for_each(|_| new_len -= 1 );
+                    // msg.truncate(new_len);
+                    // for _ in 0..msg
+                    //     .chars()
+                    //     .rev()
+                    //     .take_while(|&c| char::is_whitespace(c))
+                    //     .count()
+                    // {
+                    //     msg.pop();
+                    // }
+                    msg
+                }
+            }
         }
     }
 }
@@ -33,7 +73,8 @@ impl std::error::Error for Error {}
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub fn wide_to_utf8(mut data: *const u16) -> String {
+#[inline]
+fn wide_to_utf8(mut data: *const u16) -> String {
     let mut out = String::new();
     unsafe {
         while *data != 0 {
@@ -44,7 +85,8 @@ pub fn wide_to_utf8(mut data: *const u16) -> String {
     out
 }
 
-pub fn ansi_to_utf8(mut data: *const u8) -> String {
+#[inline]
+fn ansi_to_utf8(mut data: *const u8) -> String {
     let mut out = String::new();
     unsafe {
         while *data != 0 {
@@ -55,10 +97,22 @@ pub fn ansi_to_utf8(mut data: *const u8) -> String {
     out
 }
 
-pub fn utf8_to_wide(data: &str) -> Vec<u16> {
+#[inline]
+fn utf8_to_wide(data: &str) -> Vec<u16> {
     let mut out: Vec<u16> = data.encode_utf16().collect();
     // Add NULL terminator.
     out.push(0);
+    out
+}
+
+fn clone_wide(mut data: *const u16) -> Vec<u16> {
+    let mut out = Vec::new();
+    unsafe {
+        while *data != 0 {
+            out.push(*data);
+            data = data.add(1);
+        }
+    }
     out
 }
 
@@ -82,7 +136,7 @@ impl ResourceMetadata {
                     Err(_) => Err(()),
                 }
             } else {
-                let wide = utf8_to_wide(&data_str);
+                let wide = clone_wide(data.0);
                 Ok(ResourceMetadata::String {
                     utf8: data_str,
                     wide,
@@ -101,68 +155,19 @@ impl ResourceMetadata {
     pub fn from_id(id: u16) -> Self {
         ResourceMetadata::Id(id)
     }
-
-    pub fn from_str(data_str: &str) -> Self {
-        ResourceMetadata::String {
-            utf8: data_str.to_string(),
-            wide: utf8_to_wide(data_str),
-        }
-    }
 }
 
 impl ToString for ResourceMetadata {
     fn to_string(&self) -> String {
         match &self {
-            ResourceMetadata::Id(id) => format!("ID: {}", id),
-            ResourceMetadata::String { utf8, .. } => format!("String: {}", utf8),
+            ResourceMetadata::Id(id) => format!("{}", id),
+            ResourceMetadata::String { utf8, .. } => format!("{}", utf8),
         }
     }
 }
 
 pub type ResourceName = ResourceMetadata;
 pub type ResourceType = ResourceMetadata;
-
-pub fn build_error_message(error_code: u32) -> String {
-    unsafe {
-        let mut buf = MaybeUninit::<PWSTR>::uninit();
-        let ret = FormatMessageW(
-            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
-            None,
-            error_code,
-            0,
-            mem::transmute::<*mut PWSTR, PWSTR>(buf.as_mut_ptr()),
-            0,
-            None,
-        );
-        match ret {
-            0 => panic!(
-                "ERROR: FormatMessageW failed. Error code = {}.",
-                GetLastError().0
-            ),
-            _ => {
-                let buf = buf.assume_init();
-                let mut msg = wide_to_utf8(buf.0);
-                // Remove any trailing whitespace.
-                for _ in 0..msg
-                    .chars()
-                    .rev()
-                    .take_while(|&c| char::is_whitespace(c))
-                    .count()
-                {
-                    msg.pop();
-                }
-                if LocalFree(mem::transmute::<PWSTR, isize>(buf)) != 0 {
-                    panic!(
-                        "ERROR: LocalFree failed. Error code = {}.",
-                        GetLastError().0
-                    )
-                } else {
-                    msg
-                }
-            }
-        }
-    }
-}
 
 pub fn load_library(mod_name: &str) -> Result<HINSTANCE> {
     let mod_name = utf8_to_wide(mod_name);

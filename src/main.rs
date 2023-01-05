@@ -146,6 +146,7 @@ fn get_message_table_entries_inner(
         };
         let mut entry = unsafe { &*(start_entries as *const MESSAGE_RESOURCE_ENTRY) };
         for entry_id in block.LowId..block.HighId + 1 {
+            // TODO: Move this string parsing to the sys module.
             let entry_str = match entry.Flags {
                 // Ansi
                 0 => sys::ansi_to_utf8(entry.Text.as_ptr()),
