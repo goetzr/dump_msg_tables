@@ -15,7 +15,7 @@ pub struct Error {
 }
 
 impl Error {
-    fn new() -> Self {
+    fn last_error() -> Self {
         let code = unsafe { GetLastError().0 };
         Error {
             code,
@@ -23,7 +23,12 @@ impl Error {
         }
     }
 
-    fn from_win_error(err: )
+    fn from_win_error(err: windows::core::Error) -> Self {
+        Error {
+            code: err.code().0 as u32,
+            msg: err.message().to_string(),
+        }
+    }
 
     fn build_error_message(code: u32) -> String {
         unsafe {
@@ -45,17 +50,11 @@ impl Error {
                     LocalFree(mem::transmute::<PWSTR, isize>(buf));
 
                     // Remove any trailing whitespace.
-                    let mut new_len = msg.len();
-                    msg.chars().rev().take_while(|&c| char::is_whitespace(c)).for_each(|_| new_len -= 1 );
-                    // msg.truncate(new_len);
-                    // for _ in 0..msg
-                    //     .chars()
-                    //     .rev()
-                    //     .take_while(|&c| char::is_whitespace(c))
-                    //     .count()
-                    // {
-                    //     msg.pop();
-                    // }
+                    let ws_len = msg.chars()
+                        .rev()
+                        .take_while(|&c| char::is_whitespace(c))
+                        .count();
+                    msg.truncate(msg.len() - ws_len);
                     msg
                 }
             }
@@ -105,6 +104,7 @@ fn utf8_to_wide(data: &str) -> Vec<u16> {
     out
 }
 
+#[inline]
 fn clone_wide(mut data: *const u16) -> Vec<u16> {
     let mut out = Vec::new();
     unsafe {
@@ -113,33 +113,35 @@ fn clone_wide(mut data: *const u16) -> Vec<u16> {
             data = data.add(1);
         }
     }
+    // Add NULL terminator.
+    out.push(0);
     out
 }
 
-pub enum ResourceMetadata {
-    Id(u16),
-    String { utf8: String, wide: Vec<u16> },
+pub enum ResourceId {
+    Num(u16),
+    String { wide: Vec<u16>,  utf8: String },
 }
 
-impl ResourceMetadata {
+impl ResourceId {
     pub fn parse(data: PCWSTR) -> std::result::Result<Self, ()> {
         let data_num = unsafe { mem::transmute::<PCWSTR, usize>(data) };
         if data_num >> 16 == 0 {
-            let id = (data_num & 0xffff) as u16;
-            Ok(ResourceMetadata::Id(id))
+            let num = (data_num & 0xffff) as u16;
+            Ok(ResourceId::Num(num))
         } else {
             let data_str = wide_to_utf8(data.0);
             if data_str.starts_with("#") {
-                let id = data_str[1..].parse::<u16>();
-                match id {
-                    Ok(id) => Ok(ResourceMetadata::Id(id)),
+                let num = data_str[1..].parse::<u16>();
+                match num {
+                    Ok(num) => Ok(ResourceId::Num(num)),
                     Err(_) => Err(()),
                 }
             } else {
                 let wide = clone_wide(data.0);
-                Ok(ResourceMetadata::String {
-                    utf8: data_str,
+                Ok(ResourceId::String {
                     wide,
+                    utf8: data_str,
                 })
             }
         }
@@ -147,34 +149,32 @@ impl ResourceMetadata {
 
     pub fn pack(&self) -> PCWSTR {
         match &self {
-            ResourceName::Id(id) => unsafe { mem::transmute::<usize, PCWSTR>(*id as usize) },
+            ResourceName::Num(num) => unsafe { mem::transmute::<usize, PCWSTR>(*num as usize) },
             ResourceName::String { wide, .. } => PCWSTR::from_raw(wide.as_ptr()),
         }
     }
 
-    pub fn from_id(id: u16) -> Self {
-        ResourceMetadata::Id(id)
+    pub fn from_num(num: u16) -> Self {
+        ResourceId::Num(num)
     }
 }
 
-impl ToString for ResourceMetadata {
+impl ToString for ResourceId {
     fn to_string(&self) -> String {
         match &self {
-            ResourceMetadata::Id(id) => format!("{}", id),
-            ResourceMetadata::String { utf8, .. } => format!("{}", utf8),
+            ResourceId::Num(num) => format!("{}", num),
+            ResourceId::String { utf8, .. } => format!("{}", utf8),
         }
     }
 }
 
-pub type ResourceName = ResourceMetadata;
-pub type ResourceType = ResourceMetadata;
+pub type ResourceName = ResourceId;
+pub type ResourceType = ResourceId;
 
 pub fn load_library(mod_name: &str) -> Result<HINSTANCE> {
     let mod_name = utf8_to_wide(mod_name);
     let mod_name = PCWSTR(mod_name.as_ptr());
-    unsafe {
-        LoadLibraryW(mod_name).map_err(|e| Error::new(e.code().0 as u32, e.message().to_string()))
-    }
+    unsafe { LoadLibraryW(mod_name).map_err(|e| Error::from_win_error(e)) }
 }
 
 pub const RT_MESSAGETABLE: u16 = 11;
@@ -185,63 +185,36 @@ pub fn enum_resource_names(
     enum_func: ENUMRESNAMEPROCW,
     param: isize,
 ) -> Result<()> {
-    unsafe {
-        if EnumResourceNamesW(module, typ.pack(), enum_func, param).as_bool() {
-            Ok(())
-        } else {
-            let error_code = GetLastError().0;
-            Err(Error::new(error_code, build_error_message(error_code)))
-        }
+    if unsafe { EnumResourceNamesW(module, typ.pack(), enum_func, param).as_bool() } {
+        Ok(())
+    } else {
+        Err(Error::last_error())
     }
 }
 
-// pub fn enum_resource_types(
-//     module: HINSTANCE,
-//     enum_func: ENUMRESTYPEPROCW,
-//     param: isize,
-// ) -> Result<()> {
-//     unsafe {
-//         if EnumResourceTypesW(module, enum_func, param).as_bool() {
-//             Ok(())
-//         } else {
-//             let error_code = GetLastError().0;
-//             Err(Error::new(error_code, build_error_message(error_code)))
-//         }
-//     }
-// }
-
 pub fn find_resource(module: HINSTANCE, name: ResourceName, typ: ResourceType) -> Result<HRSRC> {
-    unsafe {
-        let resource = FindResourceW(module, name.pack(), typ.pack());
-        if resource.is_invalid() {
-            let error_code = GetLastError().0;
-            Err(Error::new(error_code, build_error_message(error_code)))
-        } else {
-            Ok(resource)
-        }
+    let resource = unsafe { FindResourceW(module, name.pack(), typ.pack()) };
+    if resource.is_invalid() {
+        Err(Error::last_error())
+    } else {
+        Ok(resource)
     }
 }
 
 pub fn load_resource(module: HINSTANCE, resource: HRSRC) -> Result<isize> {
-    unsafe {
-        let res_data = LoadResource(module, resource);
-        if res_data == 0 {
-            let error_code = GetLastError().0;
-            Err(Error::new(error_code, build_error_message(error_code)))
-        } else {
-            Ok(res_data)
-        }
+    let res_data = unsafe { LoadResource(module, resource) };
+    if res_data == 0 {
+        Err(Error::last_error())
+    } else {
+        Ok(res_data)
     }
 }
 
 pub fn lock_resource(res_data: isize) -> Result<*mut c_void> {
-    unsafe {
-        let res_mem = LockResource(res_data);
-        if res_mem.is_null() {
-            let error_code = GetLastError().0;
-            Err(Error::new(error_code, build_error_message(error_code)))
-        } else {
-            Ok(res_mem)
-        }
+    let res_mem = unsafe { LockResource(res_data) };
+    if res_mem.is_null() {
+        Err(Error::last_error())
+    } else {
+        Ok(res_mem)
     }
 }
