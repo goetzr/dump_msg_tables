@@ -7,6 +7,8 @@ use windows::Win32::Foundation::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 mod sys;
+mod error;
+mod str_util;
 
 use sys::{ResourceName, ResourceType};
 
@@ -30,7 +32,7 @@ enum Error {
     GetMsgTblEntries {
         mod_name: String,
         err_msg: String,
-        sys_err: sys::Error,
+        sys_err: error::Error,
     },
 }
 
@@ -84,7 +86,7 @@ fn get_message_table_entries(mod_name: &str) -> Result<Vec<(u32, String)>> {
     let param = unsafe { mem::transmute::<&mut Vec<ResourceName>, isize>(&mut mt_res_names) };
     sys::enum_resource_names(
         module,
-        sys::ResourceType::from_id(sys::RT_MESSAGETABLE),
+        sys::ResourceType::from_num(sys::RT_MESSAGETABLE),
         Some(enum_res_names),
         param,
     )
@@ -109,7 +111,7 @@ fn get_message_table_entries_inner(
     let resource = sys::find_resource(
         module,
         mt_res_name,
-        ResourceType::from_id(sys::RT_MESSAGETABLE),
+        ResourceType::from_num(sys::RT_MESSAGETABLE),
     )
     .map_err(|e| Error::GetMsgTblEntries {
         mod_name: mod_name.to_string(),
@@ -149,9 +151,9 @@ fn get_message_table_entries_inner(
             // TODO: Move this string parsing to the sys module.
             let entry_str = match entry.Flags {
                 // Ansi
-                0 => sys::ansi_to_utf8(entry.Text.as_ptr()),
+                0 => str_util::ansi_to_utf8(entry.Text.as_ptr()),
                 // Unicode
-                1 => sys::wide_to_utf8(entry.Text.as_ptr() as  *const u16),
+                1 => str_util::utf16_to_utf8(entry.Text.as_ptr() as  *const u16),
                 _ => panic!("Unexpected flags value in message table entry"),
             };
 
