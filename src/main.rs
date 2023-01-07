@@ -7,10 +7,9 @@ use windows::Win32::Foundation::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 mod sys;
-mod error;
-mod str_util;
 
 use sys::{ResourceName, ResourceType};
+use util::{strings, error};
 
 fn main() {
     if let Err(e) = try_main() {
@@ -151,9 +150,9 @@ fn get_message_table_entries_inner(
             // TODO: Move this string parsing to the sys module.
             let entry_str = match entry.Flags {
                 // Ansi
-                0 => str_util::ansi_to_utf8(entry.Text.as_ptr()),
+                0 => strings::ansi_to_utf8(entry.Text.as_ptr()),
                 // Unicode
-                1 => str_util::utf16_to_utf8(entry.Text.as_ptr() as  *const u16),
+                1 => strings::utf16_to_utf8(entry.Text.as_ptr() as  *const u16),
                 _ => panic!("Unexpected flags value in message table entry"),
             };
 

@@ -5,12 +5,11 @@ use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::LibraryLoader::*;
 
-use crate::str_util;
-use crate::error;
+use util::{error, strings};
 
 pub enum ResourceId {
     Num(u16),
-    String { wide: Vec<u16>,  utf8: String },
+    String { utf16: Vec<u16>, utf8: String },
 }
 
 impl ResourceId {
@@ -20,7 +19,7 @@ impl ResourceId {
             let num = (data_num & 0xffff) as u16;
             Ok(ResourceId::Num(num))
         } else {
-            let data_str = str_util::utf16_to_utf8(data.0);
+            let data_str = strings::utf16_to_utf8(data.0);
             if data_str.starts_with("#") {
                 let num = data_str[1..].parse::<u16>();
                 match num {
@@ -28,9 +27,9 @@ impl ResourceId {
                     Err(_) => Err(()),
                 }
             } else {
-                let wide = str_util::clone_utf16(data.0);
+                let utf16 = strings::clone_utf16(data.0);
                 Ok(ResourceId::String {
-                    wide,
+                    utf16,
                     utf8: data_str,
                 })
             }
@@ -40,7 +39,7 @@ impl ResourceId {
     pub fn pack(&self) -> PCWSTR {
         match &self {
             ResourceName::Num(num) => unsafe { mem::transmute::<usize, PCWSTR>(*num as usize) },
-            ResourceName::String { wide, .. } => PCWSTR::from_raw(wide.as_ptr()),
+            ResourceName::String { utf16, .. } => PCWSTR::from_raw(utf16.as_ptr()),
         }
     }
 
@@ -62,7 +61,7 @@ pub type ResourceName = ResourceId;
 pub type ResourceType = ResourceId;
 
 pub fn load_library(mod_name: &str) -> error::Result<HINSTANCE> {
-    let mod_name = str_util::utf8_to_utf16(mod_name);
+    let mod_name = strings::utf8_to_utf16(mod_name);
     let mod_name = PCWSTR(mod_name.as_ptr());
     unsafe { LoadLibraryW(mod_name).map_err(|e| error::Error::from_win_error(e)) }
 }
@@ -82,7 +81,11 @@ pub fn enum_resource_names(
     }
 }
 
-pub fn find_resource(module: HINSTANCE, name: ResourceName, typ: ResourceType) -> error::Result<HRSRC> {
+pub fn find_resource(
+    module: HINSTANCE,
+    name: ResourceName,
+    typ: ResourceType,
+) -> error::Result<HRSRC> {
     let resource = unsafe { FindResourceW(module, name.pack(), typ.pack()) };
     if resource.is_invalid() {
         Err(error::Error::last_error())
