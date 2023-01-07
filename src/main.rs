@@ -6,10 +6,7 @@ use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-mod sys;
-
-use sys::{ResourceName, ResourceType};
-use util::{strings, error};
+use window_polish::{string, error, module, resource::{self, ResourceName}};
 
 fn main() {
     if let Err(e) = try_main() {
@@ -19,38 +16,27 @@ fn main() {
 }
 
 fn try_main() -> anyhow::Result<()> {
+    // TODO: Pass module path on the command line.
     let entries = get_message_table_entries("ping.exe")?;
     for entry in entries {
-        println!("{:08x}: {}", entry.0, entry.1);
+        println!("{:>8x}: {}", entry.0, entry.1);
     }
     Ok(())
 }
 
 #[derive(Debug)]
-enum Error {
-    GetMsgTblEntries {
-        mod_name: String,
-        err_msg: String,
-        sys_err: error::Error,
-    },
+struct Error {
+    err_msg: String,
+    win_err: error::Error,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use self::Error::*;
-        match &self {
-            GetMsgTblEntries {
-                mod_name,
-                err_msg,
-                sys_err,
-            } => {
-                write!(
-                    f,
-                    "failed to get message table entries for {}: {}: {}",
-                    mod_name, err_msg, sys_err
-                )
-            }
-        }
+        write!(
+            f,
+            "failed to get message table entries{}: {}",
+            self.err_msg, self.win_err
+        )
     }
 }
 
@@ -68,66 +54,60 @@ unsafe extern "system" fn enum_res_names(
 
     match ResourceName::parse(name) {
         Ok(res_name) => names.push(res_name),
-        Err(_) => println!("ERROR: invalid resource name: expected ID after '#'"),
+        Err(_) => println!("ERROR: failed to parse resource name"),
     };
 
     true.into()
 }
 
 fn get_message_table_entries(mod_name: &str) -> Result<Vec<(u32, String)>> {
-    let module = sys::load_library(mod_name).map_err(|e| Error::GetMsgTblEntries {
-        mod_name: mod_name.to_string(),
+    let module = module::LoadLibraryW(mod_name).map_err(|e| Error {
         err_msg: "failed to load the module".to_string(),
-        sys_err: e,
+        win_err: e,
     })?;
 
     let mut mt_res_names: Vec<ResourceName> = Vec::new();
     let param = unsafe { mem::transmute::<&mut Vec<ResourceName>, isize>(&mut mt_res_names) };
-    sys::enum_resource_names(
+    resource::EnumResourceNamesW(
         module,
-        sys::ResourceType::from_num(sys::RT_MESSAGETABLE),
+        RT_MESSAGETABLE,
         Some(enum_res_names),
         param,
     )
-    .map_err(|e| Error::GetMsgTblEntries {
-        mod_name: mod_name.to_string(),
+    .map_err(|e| Error {
         err_msg: "failed to enumerate message table resource names".to_string(),
-        sys_err: e,
+        win_err: e,
     })?;
 
     let mut results = Vec::new();
     for mt_res_name in mt_res_names {
-        results.extend(get_message_table_entries_inner(mod_name, module, mt_res_name)?)
+        results.extend(get_message_table_entries_inner(module, mt_res_name)?)
     }
     Ok(results)
 }
 
 fn get_message_table_entries_inner(
-    mod_name: &str,
     module: HINSTANCE,
     mt_res_name: ResourceName,
 ) -> Result<Vec<(u32, String)>> {
-    let resource = sys::find_resource(
+    let resource = resource::FindResourceW(
         module,
-        mt_res_name,
-        ResourceType::from_num(sys::RT_MESSAGETABLE),
+        &mt_res_name,
+        RT_MESSAGETABLE,
     )
-    .map_err(|e| Error::GetMsgTblEntries {
-        mod_name: mod_name.to_string(),
+    .map_err(|e| Error {
         err_msg: "failed to find the resource".to_string(),
-        sys_err: e,
+        win_err: e,
     })?;
 
-    let res_data = sys::load_resource(module, resource).map_err(|e| Error::GetMsgTblEntries {
-        mod_name: mod_name.to_string(),
+    let res_data = resource::LoadResource(module, resource).map_err(|e| Error {
         err_msg: "failed to load the resource".to_string(),
-        sys_err: e,
+        win_err: e,
     })?;
 
-    let res_mem = sys::lock_resource(res_data).map_err(|e| Error::GetMsgTblEntries {
-        mod_name: mod_name.to_string(),
+    let res_mem = resource::LockResource(res_data).map_err(|e| Error {
         err_msg: "failed to lock the resource".to_string(),
-        sys_err: e,
+        win_err: e,
     })?;
 
     let data = unsafe { mem::transmute::<*const c_void, &MESSAGE_RESOURCE_DATA>(res_mem) };
@@ -147,13 +127,12 @@ fn get_message_table_entries_inner(
         };
         let mut entry = unsafe { &*(start_entries as *const MESSAGE_RESOURCE_ENTRY) };
         for entry_id in block.LowId..block.HighId + 1 {
-            // TODO: Move this string parsing to the sys module.
             let entry_str = match entry.Flags {
                 // Ansi
-                0 => strings::ansi_to_utf8(entry.Text.as_ptr()),
+                0 => string::ansi_to_utf8(entry.Text.as_ptr()),
                 // Unicode
-                1 => strings::utf16_to_utf8(entry.Text.as_ptr() as  *const u16),
-                _ => panic!("Unexpected flags value in message table entry"),
+                1 => string::utf16_to_utf8(entry.Text.as_ptr() as  *const u16),
+                _ => panic!("unexpected flags value in message table entry"),
             };
 
             results.push((entry_id, entry_str));
