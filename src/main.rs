@@ -4,9 +4,8 @@ use std::mem;
 
 use windows::core::*;
 use windows::Win32::Foundation::*;
+use windows::Win32::System::LibraryLoader::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-
-use window_polish::{string, error, module, resource::{self, ResourceName}};
 
 fn main() {
     if let Err(e) = try_main() {
@@ -27,7 +26,7 @@ fn try_main() -> anyhow::Result<()> {
 #[derive(Debug)]
 struct Error {
     err_msg: String,
-    win_err: error::Error,
+    win_err: wp::error::Error,
 }
 
 impl fmt::Display for Error {
@@ -50,34 +49,29 @@ unsafe extern "system" fn enum_res_names(
     name: PCWSTR,
     param: isize,
 ) -> BOOL {
-    let names = mem::transmute::<isize, &mut Vec<ResourceName>>(param);
-
-    match ResourceName::parse(name) {
-        Ok(res_name) => names.push(res_name),
-        Err(_) => println!("ERROR: failed to parse resource name"),
-    };
-
+    let names = mem::transmute::<isize, &mut Vec<PCWSTR>>(param);
+    names.push(name);
     true.into()
 }
 
 fn get_message_table_entries(mod_name: &str) -> Result<Vec<(u32, String)>> {
-    let module = module::LoadLibraryW(mod_name).map_err(|e| Error {
+    let mod_name_utf16 = wp::string::utf8_to_utf16(mod_name);
+    let res = unsafe { LoadLibraryW(PCWSTR::from_raw(mod_name_utf16.as_ptr())) };
+    let module = res.map_err(|e| Error {
         err_msg: "failed to load the module".to_string(),
-        win_err: e,
+        win_err: wp::error::Error::from_win_error(e),
     })?;
 
-    let mut mt_res_names: Vec<ResourceName> = Vec::new();
-    let param = unsafe { mem::transmute::<&mut Vec<ResourceName>, isize>(&mut mt_res_names) };
-    resource::EnumResourceNamesW(
-        module,
-        RT_MESSAGETABLE,
-        Some(enum_res_names),
-        param,
-    )
-    .map_err(|e| Error {
-        err_msg: "failed to enumerate message table resource names".to_string(),
-        win_err: e,
-    })?;
+    let mut mt_res_names: Vec<PCWSTR> = Vec::new();
+    let param = unsafe { mem::transmute::<&mut Vec<PCWSTR>, isize>(&mut mt_res_names) };
+    if !unsafe { EnumResourceNamesW(module, RT_MESSAGETABLE, Some(enum_res_names), param) }
+        .as_bool()
+    {
+        return Err(Error {
+            err_msg: "failed to enumerate message table resource names".to_string(),
+            win_err: wp::error::Error::last_error(),
+        });
+    }
 
     let mut results = Vec::new();
     for mt_res_name in mt_res_names {
@@ -88,38 +82,41 @@ fn get_message_table_entries(mod_name: &str) -> Result<Vec<(u32, String)>> {
 
 fn get_message_table_entries_inner(
     module: HINSTANCE,
-    mt_res_name: ResourceName,
+    mt_res_name: PCWSTR,
 ) -> Result<Vec<(u32, String)>> {
-    let resource = resource::FindResourceW(
-        module,
-        &mt_res_name,
-        RT_MESSAGETABLE,
-    )
-    .map_err(|e| Error {
-        err_msg: "failed to find the resource".to_string(),
-        win_err: e,
-    })?;
+    let resource = unsafe { FindResourceW(module, mt_res_name, RT_MESSAGETABLE) };
+    if resource.is_invalid() {
+        return Err(Error {
+            err_msg: "failed to find the resource".to_string(),
+            win_err: wp::error::Error::last_error(),
+        });
+    }
 
-    let res_data = resource::LoadResource(module, resource).map_err(|e| Error {
-        err_msg: "failed to load the resource".to_string(),
-        win_err: e,
-    })?;
+    let res_data = unsafe { LoadResource(module, resource) };
+    if res_data == 0 {
+        return Err(Error {
+            err_msg: "failed to load the resource".to_string(),
+            win_err: wp::error::Error::last_error(),
+        });
+    }
 
-    let res_mem = resource::LockResource(res_data).map_err(|e| Error {
-        err_msg: "failed to lock the resource".to_string(),
-        win_err: e,
-    })?;
+    let res_mem = unsafe { LockResource(res_data) };
+    if res_mem.is_null() {
+        return Err(Error {
+            err_msg: "failed to lock the resource".to_string(),
+            win_err: wp::error::Error::last_error(),
+        });
+    }
 
     let data = unsafe { mem::transmute::<*const c_void, &MESSAGE_RESOURCE_DATA>(res_mem) };
-
-    let mut results = Vec::new();
-
     let blocks = unsafe {
         std::slice::from_raw_parts(
             &data.Blocks as *const MESSAGE_RESOURCE_BLOCK,
             data.NumberOfBlocks as usize,
         )
     };
+
+    let mut results = Vec::new();
     for block in blocks {
         // NOTE: Each entry is variable length.
         let start_entries = unsafe {
@@ -129,9 +126,9 @@ fn get_message_table_entries_inner(
         for entry_id in block.LowId..block.HighId + 1 {
             let entry_str = match entry.Flags {
                 // Ansi
-                0 => string::ansi_to_utf8(entry.Text.as_ptr()),
+                0 => wp::string::ansi_to_utf8(entry.Text.as_ptr()),
                 // Unicode
-                1 => string::utf16_to_utf8(entry.Text.as_ptr() as  *const u16),
+                1 => wp::string::utf16_to_utf8(entry.Text.as_ptr() as *const u16),
                 _ => panic!("unexpected flags value in message table entry"),
             };
 
