@@ -26,7 +26,7 @@ fn try_main() -> anyhow::Result<()> {
 #[derive(Debug)]
 struct Error {
     err_msg: String,
-    win_err: wp::error::Error,
+    win_err: wp::Error,
 }
 
 impl fmt::Display for Error {
@@ -55,11 +55,11 @@ unsafe extern "system" fn enum_res_names(
 }
 
 fn get_message_table_entries(mod_name: &str) -> Result<Vec<(u32, String)>> {
-    let mod_name_utf16 = wp::string::utf8_to_utf16(mod_name);
+    let mod_name_utf16 = wp::utf8_to_utf16(mod_name);
     let res = unsafe { LoadLibraryW(PCWSTR::from_raw(mod_name_utf16.as_ptr())) };
     let module = res.map_err(|e| Error {
         err_msg: "failed to load the module".to_string(),
-        win_err: wp::error::Error::from_win_error(e),
+        win_err: wp::Error::from_win_error(e),
     })?;
 
     let mut mt_res_names: Vec<PCWSTR> = Vec::new();
@@ -69,7 +69,7 @@ fn get_message_table_entries(mod_name: &str) -> Result<Vec<(u32, String)>> {
     {
         return Err(Error {
             err_msg: "failed to enumerate message table resource names".to_string(),
-            win_err: wp::error::Error::last_error(),
+            win_err: wp::last_error(),
         });
     }
 
@@ -88,7 +88,7 @@ fn get_message_table_entries_inner(
     if resource.is_invalid() {
         return Err(Error {
             err_msg: "failed to find the resource".to_string(),
-            win_err: wp::error::Error::last_error(),
+            win_err: wp::last_error(),
         });
     }
 
@@ -96,7 +96,7 @@ fn get_message_table_entries_inner(
     if res_data == 0 {
         return Err(Error {
             err_msg: "failed to load the resource".to_string(),
-            win_err: wp::error::Error::last_error(),
+            win_err: wp::last_error(),
         });
     }
 
@@ -104,7 +104,7 @@ fn get_message_table_entries_inner(
     if res_mem.is_null() {
         return Err(Error {
             err_msg: "failed to lock the resource".to_string(),
-            win_err: wp::error::Error::last_error(),
+            win_err: wp::last_error(),
         });
     }
 
@@ -126,9 +126,9 @@ fn get_message_table_entries_inner(
         for entry_id in block.LowId..block.HighId + 1 {
             let entry_str = match entry.Flags {
                 // Ansi
-                0 => wp::string::ansi_to_utf8(entry.Text.as_ptr()),
+                0 => wp::ansi_to_utf8(entry.Text.as_ptr()),
                 // Unicode
-                1 => wp::string::utf16_to_utf8(entry.Text.as_ptr() as *const u16),
+                1 => wp::utf16_to_utf8(entry.Text.as_ptr() as *const u16),
                 _ => panic!("unexpected flags value in message table entry"),
             };
 
